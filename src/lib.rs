@@ -9,11 +9,11 @@ use std::fs::{OpenOptions};
 use std::io::prelude::*;
 use std::io::{SeekFrom};
 
-const magic: &'static str ="PAR1";
+const MAGIC: &'static str ="PAR1";
 
-fn read(fileName: String) -> std::io::Result<()> {
+fn read(file_name: String) -> std::io::Result<()> {
     let mut foptions = OpenOptions::new();
-    let mut f = foptions.read(true).open(fileName)?;
+    let mut f = foptions.read(true).open(file_name)?;
 
 
     // read footer metadta length and magic
@@ -26,7 +26,7 @@ fn read(fileName: String) -> std::io::Result<()> {
     // magic
     f.read(buf.as_mut())?;
 
-    if magic.as_bytes().ne(&buf) {
+    if MAGIC.as_bytes().ne(&buf) {
         return Err(std::io::Error::new(std::io::ErrorKind::Other, "Bad format"));
     }
 
@@ -38,7 +38,6 @@ mod tests {
     use super::*;
     #[test]
     fn it_works() {
-        //assert_eq!(2 + 2, 4);
         read("test-data/test1.snappy.parquet".to_string());
     }
 }
