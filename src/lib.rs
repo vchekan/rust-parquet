@@ -5,6 +5,7 @@ extern crate try_from;
 mod parquet;
 
 use std::fs::{OpenOptions, File};
+use std::io;
 use std::io::prelude::*;
 use std::io::{BufReader, SeekFrom, Result};
 use thrift::protocol::{TCompactInputProtocol};
@@ -16,7 +17,7 @@ const MAGIC: &'static str ="PAR1";
 pub struct Reader {
     pub info: Info,
     file_meta: FileMetaData,
-    root_file: BufReader<File>,
+    pub protocol: TCompactInputProtocol<BufReader<File>>
 }
 pub struct Info {
     pub version: i32,
@@ -27,63 +28,110 @@ pub struct Info {
 
 impl Reader {
     pub fn open(file_name: &String) -> Result<Reader> {
-        let mut foptions = OpenOptions::new();
-        let mut unbuffered = foptions.read(true).open(file_name)?;
+        let unbuffered = OpenOptions::new().read(true).open(file_name)?;
         let mut buffered = BufReader::new(unbuffered);
 
-        // TODO: check magic at file start
+        validate_magic(&mut buffered)?;
+        
         // read footer metadata length and magic
         buffered.seek(SeekFrom::End(-(4 + 4)))?;
         let mut buf4: [u8; 4] = [0; 4];
         buffered.read_exact(buf4.as_mut())?;
         let footer_len: u32 = (buf4[0] as u32) | (buf4[1] as u32) << 8 | (buf4[2] as u32) << 16 | (buf4[3] as u32) << 24;
-        println!("footer len: {}, {:?}", footer_len, buf4);
-
-        // magic
-        buffered.read_exact(buf4.as_mut())?;
-        if MAGIC.as_bytes().ne(&buf4) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Other, "Bad format"));
-        }
 
         buffered.seek(SeekFrom::Current(-(footer_len as i64 +8_i64))).expect("File metadata position failed");
 
         let mut protocol = TCompactInputProtocol::new(buffered);
-        let fileMeta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
+        let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
 
         Ok(Reader {
             info: Info {
-                version: fileMeta.version,
-                num_rows: fileMeta.num_rows,
-                row_groups: fileMeta.row_groups.len(),
-                created_by: fileMeta.created_by.clone().unwrap_or(String::from(""))
+                version: file_meta.version,
+                num_rows: file_meta.num_rows,
+                row_groups: file_meta.row_groups.len(),
+                created_by: file_meta.created_by.clone().unwrap_or(String::new())
             },
-            file_meta: fileMeta,
-            root_file: buffered
+            file_meta,
+            protocol
         })
+    }
+
+}
+
+/**
+    Validate magic 'PAR1' at start and end of file
+*/
+fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
+    let mut buf4: [u8; 4] = [0; 4];
+
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(buf4.as_mut())?;
+    if MAGIC.as_bytes().ne(&buf4) {
+        return Err(std::io::Error::new(io::ErrorKind::Other, "Bad magic at file start"));
+    }
+
+    file.seek(SeekFrom::End(-4))?;
+    file.read_exact(buf4.as_mut())?;
+    if MAGIC.as_bytes().ne(&buf4) {
+        return Err(std::io::Error::new(io::ErrorKind::Other, "Bad magic at file end"));
+    }
+
+    Ok(())
+}
+
+impl IntoIterator for Reader {
+    type Item = i32;
+    type IntoIter = Iter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Iter {
+            group: 0,
+            column: 0,
+            group_len: self.file_meta.row_groups.len(),
+            column_len: self.file_meta.row_groups[0].columns.len(),
+            reader: self
+        }
     }
 }
 
-impl Iterator for Reader {
-    type Item = String;
-    fn next(&mut self) -> Option<String> {
-        for row_group in self.file_meta.row_groups {
-            for column in row_group.columns {
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct Iter {
+    group: usize,
+    column: usize,
+    group_len: usize,
+    column_len: usize,
+    reader: Reader
+}
 
-                if column.file_path.is_some() {
-                    // TODO: resolve external files during open, or lazily???
-                    panic!("Column group in external file is not implemented");
+impl Iterator for Iter {
+    type Item = i32;
+    fn next(&mut self) -> Option<i32> {
+        if self.group >= self.group_len {
+            None
+        } else {
+            let group;
+            let column;
+            if self.column >= self.column_len {
+                self.column = 0;
+                self.group += 1;
+                if self.group >= self.group_len {
+                    return None;
                 }
-
-                let column_meta = column.meta_data.expect("Column metadata is not set");
-                self.root_file.seek(SeekFrom::Start(column_meta.data_page_offset as u64)).expect("Can not position to data page");
-                let mut protocol = TCompactInputProtocol::new(self.root_file);
-                let page_header = PageHeader::read_from_in_protocol(& mut protocol).expect("Page Header deserialization failed");
-
-                println!("{:?}", page_header.type_);
+                group = &self.reader.file_meta.row_groups[self.group];
+                column = &group.columns[self.column];
+                self.column_len = group.columns.len(); // can column count be different in different column chunk?
+            } else {
+                group = &self.reader.file_meta.row_groups[self.group];
+                column = &group.columns[self.column];
             }
-        }
 
-        None
+            self.reader.protocol.seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
+            let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
+            println!("PageHeader: {:?}", page_header);
+
+            self.column += 1;
+            Some(1)
+        }
     }
 }
 
@@ -91,8 +139,9 @@ impl Iterator for Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn it_works() {
+    fn can_get_metadata() {
         let reader = Reader::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
         println!("Version {}, rows: {}, row_groups: {}\n    created_by {:?}",
                  reader.info.version,
@@ -101,5 +150,13 @@ mod tests {
                  reader.info.created_by
         );
 
+    }
+
+    #[test]
+    fn iterator() {
+        let reader = Reader::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        for row in reader {
+            //println!("Row: {}", row);
+        }
     }
 }
