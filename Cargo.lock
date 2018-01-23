@@ -45,7 +45,7 @@ name = "rust-parquet"
 version = "0.1.0"
 dependencies = [
  "ordered-float 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "thrift 1.0.0 (git+https://github.com/vchekan/thrift)",
+ "thrift 1.0.0",
  "try_from 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -60,7 +60,6 @@ dependencies = [
 [[package]]
 name = "thrift"
 version = "1.0.0"
-source = "git+https://github.com/vchekan/thrift#3be8277c5a1a81058bd9457d9de000f6d6fb6528"
 dependencies = [
  "byteorder 1.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "integer-encoding 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -96,7 +95,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 "checksum num_cpus 1.7.0 (registry+https://github.com/rust-lang/crates.io-index)" = "514f0d73e64be53ff320680ca671b64fe3fb91da01e1ae2ddc99eb51d453b20d"
 "checksum ordered-float 0.5.0 (registry+https://github.com/rust-lang/crates.io-index)" = "58d25b6c0e47b20d05226d288ff434940296e7e2f8b877975da32f862152241f"
 "checksum threadpool 1.7.1 (registry+https://github.com/rust-lang/crates.io-index)" = "e2f0c90a5f3459330ac8bc0d2f879c693bb7a2f59689c1083fc4ef83834da865"
-"checksum thrift 1.0.0 (git+https://github.com/vchekan/thrift)" = "<none>"
 "checksum try_from 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)" = "923a7ee3e97dbfe8685261beb4511cc9620a1252405d02693d43169729570111"
 "checksum unreachable 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "1f2ae5ddb18e1c92664717616dd9549dde73f539f01bd7b77c2edb2446bdff91"
 "checksum void 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)" = "6a02e4885ed3bc0f2de90ea6dd45ebcbb66dacffe03547fadbb0eeae2770887d"
