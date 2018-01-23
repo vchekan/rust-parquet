@@ -1,0 +1,3 @@
+* Pull request to Thrift (expose internal stream)
+* Add hints implementation to iterators
+* Design interactive visualization for compression (Bret Victor inspired)
