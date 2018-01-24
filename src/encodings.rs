@@ -1,14 +1,14 @@
+use byteorder::{ByteOrder, LittleEndian};
 
-// TODO: use mod byteorder to read little endian
 #[derive(Debug)]
-pub struct RleReader<'a> {
+pub struct BitPackingRleReader<'a> {
     bit_width: u32,
     compressed_len: u32,
     data: &'a [u8],
 }
 
-impl<'a> RleReader<'a> {
-    pub fn new(max_level: u32, data: &'a [u8]) -> Result<RleReader,String> {
+impl<'a> BitPackingRleReader<'a> {
+    pub fn new(max_level: u32, data: &'a [u8]) -> Result<BitPackingRleReader,String> {
         if data.len() < 4 {return Err("Failed to read RLE encoding length".to_string())}
 
         let len_encoded: u32 = (data[3] as u32) << 8*3 | (data[2] as u32) << 8*2 | (data[1] as u32) << 8 | data[0] as u32;
@@ -38,7 +38,7 @@ impl<'a> RleReader<'a> {
             }
         }
 
-        Ok(RleReader {
+        Ok(BitPackingRleReader {
             bit_width,
             compressed_len: 4 + len_encoded,
             data,
@@ -46,7 +46,7 @@ impl<'a> RleReader<'a> {
     }
  }
 
-impl<'a> IntoIterator for RleReader<'a> {
+impl<'a> IntoIterator for BitPackingRleReader<'a> {
     type Item = i32;
     type IntoIter = RleIter<'a>;
 
@@ -90,6 +90,27 @@ impl<'a> RleIter<'a> {
     }
 }
 
+//
+// Packed Reader
+//
+
+pub struct BitPackingReader<'a> {
+    compressed_len: u32,
+    data: &'a [u8],
+}
+
+impl<'a> BitPackingReader<'a> {
+    fn new(data: &'a [u8]) -> Result<BitPackingReader,String> {
+        if data.len() < 4 {return Err("Bit packing read error: can't read size".to_string())}
+
+        let compressed_len = LittleEndian::read_u32(data);
+        Ok(BitPackingReader {
+            compressed_len,
+            data,
+        })
+    }
+}
+
 #[derive(Debug)]
 enum Mode {
     Rle,
@@ -128,9 +149,9 @@ fn read_bitpack_int(bit_width: u32, data: &[u8]) -> Result<i32,String> {
     match byte_len {
         0 => Ok(0),
         1 => Ok(data[0] as i32),
-        2 => Ok(data[0] as i32| (data[1] as i32) << 8),
-        3 => Ok(data[0] as i32| (data[1] as i32) << 8 | (data[2] as i32) << 8*2),
-        4 => Ok(data[0] as i32| (data[1] as i32) << 8 | (data[2] as i32) << 8*2 | (data[3] as i32) << 8*3),
+        2 => Ok(LittleEndian::read_i16(data) as i32),
+        3 => Ok(LittleEndian::read_i24(data) as i32),
+        4 => Ok(LittleEndian::read_i32(data)),
         _ => Err(format!("Can not handle packed int longer than 4. Got {}", bit_width))
     }
 }

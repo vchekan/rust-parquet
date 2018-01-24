@@ -5,6 +5,7 @@ authors = ["Vadim Chekan <kot.begemot@gmail.com>"]
 
 [dependencies]
 snap = "0.2.4"
+byteorder = "1.1.0"
 #thrift = "0.0.4"
 #thrift = {git = "https://github.com/vchekan/thrift"}
 thrift = { path = "../thrift/lib/rs"}
