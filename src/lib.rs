@@ -1,3 +1,4 @@
+extern crate snap;
 extern crate thrift;
 extern crate ordered_float;
 extern crate try_from;
@@ -50,7 +51,7 @@ impl Reader {
 
         let mut protocol = TCompactInputProtocol::new(buffered);
         let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
-        println!("FileMeta.schema: {:?}", file_meta.schema);
+        //println!("FileMeta.schema: {:?}", file_meta.schema);
 
         Ok(Reader {
             info: Info {
@@ -137,10 +138,12 @@ impl Iterator for Iter {
             column = &group.columns[self.column];
         }
 
+
         //
         // Read page meta
         //
         println!("Column: {:?}", column);
+        let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
         self.reader.protocol.inner().seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
         let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
         println!("PageHeader: {:?}", page_header);
@@ -149,20 +152,36 @@ impl Iterator for Iter {
         // Read page raw data
         //
         // TODO: check page size for sanity
-        let mut page_data: Vec<u8> = Vec::with_capacity(page_header.compressed_page_size as usize);
-        unsafe {
-            let cap = page_data.capacity();
-            page_data.set_len(cap)
+        let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
+        self.reader.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
+        println!("page_data_compressed: {:?}", &page_data_compressed[0..100.min(page_data_compressed.len())]);
+
+        //
+        // Decompress page data
+        //
+        let page_data = match column_meta.codec {
+            parquet::CompressionCodec::UNCOMPRESSED => {
+                page_data_compressed
+            },
+            parquet::CompressionCodec::SNAPPY => {
+                let mut buff = vec![0_u8; page_header.uncompressed_page_size as usize];
+                let res = snap::Decoder::new().decompress(&page_data_compressed, &mut buff).expect("Snappy decompression failed");
+                println!("Snappy read: {}", res);
+                buff
+            },
+            // TODO
+            _ => unimplemented!("this compression is not implemented yet: {:?}", column_meta.codec)
         };
-        self.reader.protocol.inner().read_exact(&mut page_data).expect("Failed to read page");
+        println!("page_data (un-compressed): {:?}", &page_data[0..100.min(page_data.len())]);
+
 
         //
         // Decode repetition and definition levels
         //
         // TODO: what's the right  way to act if error in format in iterator?
         //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
-        let definition_levels = RleReader::new(1, &page_data[3..]).expect("Failed to parse definition levels");
-        println!("definition_levels: {:?}", definition_levels);
+        let definition_levels = RleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
+        //println!("definition_levels: {:?}", definition_levels);
 
         self.column += 1;
         Some(1)
@@ -203,7 +222,7 @@ mod tests {
         });
         */
 
-        for row in reader.into_iter() {
+        for row in reader {
             //println!("Row: {}", row);
         }
     }

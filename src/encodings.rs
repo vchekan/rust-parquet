@@ -29,7 +29,8 @@ impl<'a> RleReader<'a> {
         match mode {
             Mode::Rle => {
                 let repeated = header >> 1;
-                let val = read_bitpack_int(bit_width, data);
+                let val = read_bitpack_int(bit_width, data).expect("Failed to decode RLE value");
+                println!("RLE decoding: repeated: {} val: {}", repeated, val);
             }
             Mode::Packed => {
                 //return Err("Mode::Packed not implemented yet".to_string());
