@@ -1,4 +1,5 @@
 extern crate snap;
+extern crate byteorder;
 extern crate thrift;
 extern crate ordered_float;
 extern crate try_from;
@@ -12,39 +13,30 @@ use std::io::prelude::*;
 use std::io::{BufReader, SeekFrom, Result};
 use thrift::protocol::{TCompactInputProtocol};
 use parquet::*;
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 
-use encodings::RleReader;
+use encodings::BitPackingRleReader;
 
 
 const MAGIC: &'static str ="PAR1";
 
-pub struct Reader {
-    pub info: Info,
+pub struct FileInfo {
     file_meta: FileMetaData,
     pub protocol: TCompactInputProtocol<BufReader<File>>
 
 }
-pub struct Info {
-    pub version: i32,
-    pub num_rows: i64,
-    pub row_groups: usize,
-    pub created_by: String
-}
 
-impl Reader {
-    pub fn open(file_name: &String) -> Result<Reader> {
+impl FileInfo {
+    pub fn open(file_name: &String) -> Result<FileInfo> {
         let unbuffered = OpenOptions::new().read(true).open(file_name)?;
-        //let clone = unbuffered.try_clone()?;
-        let mut buffered = BufReader::new(unbuffered); //Rc::new(BufReader::new(unbuffered));
+        let mut buffered = BufReader::new(unbuffered);
 
-        validate_magic(&mut buffered)?;
+        validate_magic(&mut buffered)?; use byteorder::{ByteOrder, LittleEndian};
         
         // read footer metadata length and magic
         // TODO: BufReader's seek reset buffers even if seek is within buffered range :(
         buffered.seek(SeekFrom::End(-(4 + 4)))?;
-        let mut buf4: [u8; 4] = [0; 4];
-        buffered.read_exact(buf4.as_mut())?;
-        let footer_len: u32 = (buf4[0] as u32) | (buf4[1] as u32) << 8 | (buf4[2] as u32) << 16 | (buf4[3] as u32) << 24;
+        let footer_len = buffered.read_u32::<LittleEndian>()?;
         println!("footer_len: {}", footer_len);
 
         buffered.seek(SeekFrom::End(-(footer_len as i64 +8_i64))).expect("File metadata position failed");
@@ -53,16 +45,26 @@ impl Reader {
         let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
         //println!("FileMeta.schema: {:?}", file_meta.schema);
 
-        Ok(Reader {
-            info: Info {
-                version: file_meta.version,
-                num_rows: file_meta.num_rows,
-                row_groups: file_meta.row_groups.len(),
-                created_by: file_meta.created_by.clone().unwrap_or(String::new())
-            },
+        Ok(FileInfo {
             file_meta,
             protocol
         })
+    }
+
+    pub fn version(&self) -> i32 {
+        self.file_meta.version
+    }
+
+    pub fn num_rows(&self) -> i64 {
+        self.file_meta.num_rows
+    }
+
+    pub fn row_groups(&self) -> usize {
+        self.file_meta.row_groups.len()
+    }
+
+    pub fn created_by(&self) -> Option<&String> {
+        self.file_meta.created_by.as_ref()
     }
 }
 
@@ -87,7 +89,7 @@ fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
     Ok(())
 }
 
-impl IntoIterator for Reader {
+impl IntoIterator for FileInfo {
     type Item = i32;
     type IntoIter = Iter;
 
@@ -108,7 +110,7 @@ pub struct Iter {
     column: usize,
     group_len: usize,
     column_len: usize,
-    reader: Reader
+    reader: FileInfo
 }
 
 impl Iterator for Iter {
@@ -142,11 +144,11 @@ impl Iterator for Iter {
         //
         // Read page meta
         //
-        println!("Column: {:?}", column);
+        println!("Column: {:#?}", column);
         let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
         self.reader.protocol.inner().seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
         let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
-        println!("PageHeader: {:?}", page_header);
+        println!("PageHeader: {:#?}", page_header);
 
         //
         // Read page raw data
@@ -180,7 +182,7 @@ impl Iterator for Iter {
         //
         // TODO: what's the right  way to act if error in format in iterator?
         //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
-        let definition_levels = RleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
+        //let definition_levels = BitPackingRleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
         //println!("definition_levels: {:?}", definition_levels);
 
         self.column += 1;
@@ -189,7 +191,10 @@ impl Iterator for Iter {
 }
 
 // TODO:
-fn max_definition_levels() -> i32 {1}
+fn max_definition_levels(path: Vec<String>) -> i32 {
+    
+    1
+}
 fn max_repetition_level() -> i32 {1}
 
 #[cfg(test)]
@@ -198,19 +203,18 @@ mod tests {
 
     #[test]
     fn can_get_metadata() {
-        let reader = Reader::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        let fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
         println!("Version {}, rows: {}, row_groups: {}\n    created_by {:?}",
-                 reader.info.version,
-                 reader.info.num_rows,
-                 reader.info.row_groups,
-                 reader.info.created_by
+                 fileMeta.version(),
+                 fileMeta.num_rows(),
+                 fileMeta.row_groups(),
+                 fileMeta.created_by()
         );
-
     }
 
     #[test]
     fn iterator() {
-        let reader = Reader::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        let fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
 
         /*
         let record = parquet!({
@@ -222,7 +226,7 @@ mod tests {
         });
         */
 
-        for row in reader {
+        for row in fileMeta {
             //println!("Row: {}", row);
         }
     }
