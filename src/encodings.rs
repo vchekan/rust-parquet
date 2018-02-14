@@ -135,7 +135,7 @@ fn read_leb128(data: &[u8], offset: u32) -> u32 {
         res |= (byte as u32 & 0x7f) << shift;
         shift += 7;
         pos += 1;
-        if (byte as u32 & 0x80) != 0 {
+        if (byte as u32 & 0x80) == 0 {
             break res
         }
     }
