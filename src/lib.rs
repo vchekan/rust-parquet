@@ -6,6 +6,7 @@ extern crate try_from;
 
 mod parquet;
 mod encodings;
+mod levels;
 
 use std::fs::{OpenOptions, File};
 use std::io;
@@ -31,7 +32,7 @@ impl FileInfo {
         let unbuffered = OpenOptions::new().read(true).open(file_name)?;
         let mut buffered = BufReader::new(unbuffered);
 
-        validate_magic(&mut buffered)?; use byteorder::{ByteOrder, LittleEndian};
+        validate_magic(&mut buffered)?; //use byteorder::{ByteOrder, LittleEndian};
         
         // read footer metadata length and magic
         // TODO: BufReader's seek reset buffers even if seek is within buffered range :(
@@ -49,6 +50,10 @@ impl FileInfo {
             file_meta,
             protocol
         })
+    }
+
+    pub fn iter(&mut self) -> Iter {
+        Iter::new(self)
     }
 
     pub fn version(&self) -> i32 {
@@ -89,65 +94,39 @@ fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
     Ok(())
 }
 
-impl IntoIterator for FileInfo {
+/*impl<'a> IntoIterator for FileInfo {
     type Item = i32;
-    type IntoIter = Iter;
+    type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        Iter {
-            group: 0,
-            column: 0,
-            group_len: self.file_meta.row_groups.len(),
-            column_len: self.file_meta.row_groups[0].columns.len(),
-            reader: self
-        }
+        Iter::new(self)
     }
-}
+}*/
 
 #[must_use = "iterators are lazy and do nothing unless consumed"]
-pub struct Iter {
+pub struct Iter<'a> {
     group: usize,
     column: usize,
+    row: usize,
     group_len: usize,
     column_len: usize,
-    reader: FileInfo
+    reader: &'a FileInfo,
+
+    buffer: Vec<u8>,
+    data_offset: usize,
 }
 
-impl Iterator for Iter {
-    type Item = i32;
-    fn next(&mut self) -> Option<i32> {
-
-        if self.group >= self.group_len {
-            return None;
-        }
-
-        //
-        // Advance column pointer
-        //
-        let group;
-        let column;
-        if self.column >= self.column_len {
-            self.column = 0;
-            self.group += 1;
-            if self.group >= self.group_len {
-                return None;
-            }
-            group = &self.reader.file_meta.row_groups[self.group];
-            column = &group.columns[self.column];
-            self.column_len = group.columns.len(); // can column count be different in different column chunk?
-        } else {
-            group = &self.reader.file_meta.row_groups[self.group];
-            column = &group.columns[self.column];
-        }
-
-
+impl<'a> Iter<'a> {
+    fn new(meta: &'a mut FileInfo) -> Iter<'a> {
         //
         // Read page meta
         //
+        let group = &meta.file_meta.row_groups[0];
+        let column = &group.columns[0];
         println!("Column: {:#?}", column);
         let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
-        self.reader.protocol.inner().seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
-        let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
+        meta.protocol.inner().seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
+        let page_header = PageHeader::read_from_in_protocol(&mut meta.protocol).expect("Failed to deserialize ColumnMetaData");
         println!("PageHeader: {:#?}", page_header);
 
         //
@@ -155,7 +134,7 @@ impl Iterator for Iter {
         //
         // TODO: check page size for sanity
         let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
-        self.reader.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
+        meta.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
         println!("page_data_compressed: {:?}", &page_data_compressed[0..100.min(page_data_compressed.len())]);
 
         //
@@ -174,28 +153,76 @@ impl Iterator for Iter {
             // TODO
             _ => unimplemented!("this compression is not implemented yet: {:?}", column_meta.codec)
         };
-        println!("page_data (un-compressed): {:?}", &page_data[0..100.min(page_data.len())]);
+        println!("page_data (un-compressed)[{}]: {:?}", page_data.len(), &page_data[0..100.min(page_data.len())]);
 
+
+        let mut data_offset;
+        {
+            //
+            // Decode repetition and definition levels
+            //
+            //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
+            let definition_levels = BitPackingRleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
+            //println!("definition_levels: {:?}", definition_levels);
+            data_offset = definition_levels.next;
+            println!("data_offset: {}", data_offset);
+        }
+
+        Iter {
+            group: 0,
+            column: 0,
+            row: 0,
+            group_len: meta.file_meta.row_groups.len(),
+            column_len: meta.file_meta.row_groups[0].columns.len(),
+            reader: meta,
+            buffer: page_data,
+            data_offset,
+        }
+    }
+}
+
+impl<'a> Iterator for Iter<'a> {
+    // TODO: what's the right  way to act if error in format in iterator?
+
+    type Item = i64;
+    fn next(&mut self) -> Option<i64> {
+
+        if self.group >= self.group_len {
+            return None;
+        }
 
         //
-        // Decode repetition and definition levels
+        // Advance column pointer
         //
-        // TODO: what's the right  way to act if error in format in iterator?
-        //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
-        //let definition_levels = BitPackingRleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
-        //println!("definition_levels: {:?}", definition_levels);
+        /*if self.column >= self.column_len {
+            self.column = 0;
+            self.group += 1;
+            if self.group >= self.group_len {
+                return None;
+            }
+            group = &self.reader.file_meta.row_groups[self.group];
+            column = &group.columns[self.column];
+            self.column_len = group.columns.len(); // can column count be different in different column chunk?
+        } else {
+            group = &self.reader.file_meta.row_groups[self.group];
+            column = &group.columns[self.column];
+        }*/
 
-        self.column += 1;
-        Some(1)
+        //self.column += 1;
+        let current_data = &self.buffer[self.data_offset + self.row * 8..];
+        let res = LittleEndian::read_i64(current_data);
+        self.row += 1;
+        Some(res)
     }
 }
 
 // TODO:
 fn max_definition_levels(path: Vec<String>) -> i32 {
-    
     1
 }
 fn max_repetition_level() -> i32 {1}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -214,7 +241,7 @@ mod tests {
 
     #[test]
     fn iterator() {
-        let fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
 
         /*
         let record = parquet!({
@@ -226,8 +253,23 @@ mod tests {
         });
         */
 
-        for row in fileMeta {
-            //println!("Row: {}", row);
+        for row in fileMeta.iter().take(10) {
+            println!("Row: {}", row);
         }
+    }
+
+    #[test]
+    fn client() {
+        /*let record = parquet!{
+            reddit {
+                { id: u64,
+                  body: String,
+                }
+            }
+        };
+
+        let fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        fileMeta.read().take(100)(|record| println!("{}", record));
+        */
     }
 }

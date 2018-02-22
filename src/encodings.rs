@@ -5,31 +5,32 @@ pub struct BitPackingRleReader<'a> {
     bit_width: u32,
     compressed_len: u32,
     data: &'a [u8],
+    pub next: usize,
 }
 
 impl<'a> BitPackingRleReader<'a> {
     pub fn new(max_level: u32, data: &'a [u8]) -> Result<BitPackingRleReader,String> {
         if data.len() < 4 {return Err("Failed to read RLE encoding length".to_string())}
 
-        let len_encoded: u32 = (data[3] as u32) << 8*3 | (data[2] as u32) << 8*2 | (data[1] as u32) << 8 | data[0] as u32;
+        let len_encoded = LittleEndian::read_u32(data);
         println!(">>> len_encoded: {0}", len_encoded);
-        let mut pos = 4;
+        let mut pos = 4_usize;
 
-        if (pos + len_encoded) as usize > data.len() {
+        if pos + len_encoded as usize > data.len() {
             return Err(format!("Unexpected end of RLE data. Declared length {} but got {}",
                len_encoded,
                data.len()-4
             ))
         }
 
-        let bit_width = bit_width(max_level);
-        let header: u32 = read_leb128(data, 4);
+        let header: u32 = read_leb128(data, &mut pos);
         let mode = if header & 1 == 1 { Mode::Packed } else { Mode::Rle };
-        println!("Pack mode: {:?}", mode);
+        let bit_width = bit_width(max_level);
+        println!("Pack mode: {:?} header: {}", mode, header);
         match mode {
             Mode::Rle => {
                 let repeated = header >> 1;
-                let val = read_bitpack_int(bit_width, data).expect("Failed to decode RLE value");
+                let val = read_bitpack_int(bit_width, data, & mut pos).expect("Failed to decode RLE value");
                 println!("RLE decoding: repeated: {} val: {}", repeated, val);
             }
             Mode::Packed => {
@@ -42,6 +43,7 @@ impl<'a> BitPackingRleReader<'a> {
             bit_width,
             compressed_len: 4 + len_encoded,
             data,
+            next: 4 + len_encoded as usize,
         })
     }
  }
@@ -125,12 +127,12 @@ fn round_to_byte(bits: u32) -> u32 {
     (bits + 7) / 8
 }
 
-fn read_leb128(data: &[u8], offset: u32) -> u32 {
+fn read_leb128(data: &[u8], offset: &mut usize) -> u32 {
     let mut res = 0_u32;
-    let mut pos = offset as usize;
+    let mut pos = *offset;
     let mut shift = 0;
 
-    loop {
+    let res = loop {
         let byte = data[pos];
         res |= (byte as u32 & 0x7f) << shift;
         shift += 7;
@@ -138,22 +140,31 @@ fn read_leb128(data: &[u8], offset: u32) -> u32 {
         if (byte as u32 & 0x80) == 0 {
             break res
         }
-    }
+    };
+
+    *offset = pos;
+    res
 }
 
-fn read_bitpack_int(bit_width: u32, data: &[u8]) -> Result<i32,String> {
+fn read_bitpack_int(bit_width: u32, data: &[u8], offset: &mut usize) -> Result<i32,String> {
     let byte_len = round_to_byte(bit_width) as usize;
 
     if byte_len > data.len() { return Err(format!("Too small buffer to unpack int. Int len: {} but buffer len: {}", byte_len, data.len()))}
 
-    match byte_len {
+    let res = match byte_len {
         0 => Ok(0),
-        1 => Ok(data[0] as i32),
-        2 => Ok(LittleEndian::read_i16(data) as i32),
-        3 => Ok(LittleEndian::read_i24(data) as i32),
-        4 => Ok(LittleEndian::read_i32(data)),
+        1 => Ok(data[*offset] as i32),
+        2 => Ok(LittleEndian::read_i16(&data[*offset..]) as i32),
+        3 => Ok(LittleEndian::read_i24(&data[*offset..]) as i32),
+        4 => Ok(LittleEndian::read_i32(&data[*offset..])),
         _ => Err(format!("Can not handle packed int longer than 4. Got {}", bit_width))
+    };
+
+    if res.is_ok() {
+        *offset += byte_len;
     }
+
+    res
 }
 
 
