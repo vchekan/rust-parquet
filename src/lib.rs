@@ -44,7 +44,7 @@ impl FileInfo {
 
         let mut protocol = TCompactInputProtocol::new(buffered);
         let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
-        //println!("FileMeta.schema: {:?}", file_meta.schema);
+        println!("{:#?}", file_meta);
 
         Ok(FileInfo {
             file_meta,
@@ -96,20 +96,23 @@ fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
 pub struct ColumnIter<'a> {
     group: usize,
     column: usize,
-    reader: &'a FileInfo,
+    reader: &'a mut FileInfo,
     next_page_offset: u64,
 
     buffer: Vec<u8>,
     data_offset: usize,
 }
 
-impl<'a> ColumnIter<'a> {
-    fn new(meta: &'a mut FileInfo) -> ColumnIter<'a> {
+impl<'a> ColumnIter<'a>  {
+    fn new(meta: &mut FileInfo) -> ColumnIter {
 
         // Get 1st page offset
-        let group = &meta.file_meta.row_groups[0];
-        let column = &group.columns[0];
-        let next_page_offset = column.file_offset as u64;
+        let next_page_offset;
+        {
+            let group = &meta.file_meta.row_groups[0];
+            let column = &group.columns[0];
+            next_page_offset = column.file_offset as u64;
+        }
 
         //println!("Column: {:#?}", column);
         //let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
@@ -127,8 +130,8 @@ impl<'a> ColumnIter<'a> {
         iter
     }
 
-    fn next_page(&'a mut self) -> Result<()> {
-        let group = self.reader.file_meta.row_groups[self.group];
+    fn next_page(&mut self) -> Result<()> {
+        let group = &self.reader.file_meta.row_groups[self.group];
         let column = &group.columns[self.column];
         let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
 
@@ -137,38 +140,25 @@ impl<'a> ColumnIter<'a> {
         //
         self.reader.protocol.inner().seek(SeekFrom::Start(self.next_page_offset)).expect("Failed to seek to column metadata");
         let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
-        println!("PageHeader: {:#?}", page_header);
-
-        //
-        // Read page raw data
-        //
-        // TODO: check page size for sanity
-        //let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
-        //if column_meta.codec == parquet::CompressionCodec::UNCOMPRESSED {
-        //} else {
-        //    self.reader.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
-        //}
-        //println!("page_data_compressed: {:?}", &page_data_compressed[0..100.min(page_data_compressed.len())]);
+        println!("{:#?}", page_header);
 
         //
         // Decompress page data
         //
-        //let page_data =
+        // TODO: check page size for sanity
         match column_meta.codec {
             parquet::CompressionCodec::UNCOMPRESSED => {
                 self.buffer.resize(page_header.compressed_page_size as usize, 0);
                 self.reader.protocol.inner().read_exact(self.buffer.as_mut())?;
-                //page_data_compressed
+                println!("Read uncompressed page");
             },
             parquet::CompressionCodec::SNAPPY => {
                 let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
                 self.reader.protocol.inner().read_exact(&mut page_data_compressed)?;
 
-                let mut buff = vec![0_u8; page_header.uncompressed_page_size as usize];
-                //let res = snap::Decoder::new().decompress(&page_data_compressed, &mut buff).expect("Snappy decompression failed");
+                self.buffer.resize(page_header.uncompressed_page_size as usize, 0);
                 let res = snap::Decoder::new().decompress(&page_data_compressed, self.buffer.as_mut())?;
                 println!("Snappy read: {}", res);
-                //buff
             },
             // TODO
             _ => unimplemented!("this compression is not implemented yet: {:?}", column_meta.codec)
@@ -202,9 +192,10 @@ impl<'a> Iterator for ColumnIter<'a> {
     fn next(&mut self) -> Option<i64> {
 
         if self.data_offset >= self.buffer.len() {
-            let s = self;
-            let next_page = s.next_page();
-            if !next_page.is_ok() {
+            println!("next: {} >= {}", self.data_offset, self.buffer.len());
+            let next_page_result = self.next_page();
+            if !next_page_result.is_ok() {
+                println!("next_page: {:?}", next_page_result);
                 return None
             }
         }
