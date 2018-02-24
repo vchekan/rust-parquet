@@ -52,8 +52,8 @@ impl FileInfo {
         })
     }
 
-    pub fn iter(&mut self) -> Iter {
-        Iter::new(self)
+    pub fn iter(&mut self) -> ColumnIter {
+        ColumnIter::new(self)
     }
 
     pub fn version(&self) -> i32 {
@@ -73,9 +73,7 @@ impl FileInfo {
     }
 }
 
-/**
-    Validate magic 'PAR1' at start and end of file
-*/
+///    Validate magic 'PAR1' at start and end of file
 fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
     let mut buf4: [u8; 4] = [0; 4];
 
@@ -94,66 +92,88 @@ fn validate_magic(file: &mut BufReader<File>) -> Result<()> {
     Ok(())
 }
 
-/*impl<'a> IntoIterator for FileInfo {
-    type Item = i32;
-    type IntoIter = Iter<'a>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        Iter::new(self)
-    }
-}*/
-
 #[must_use = "iterators are lazy and do nothing unless consumed"]
-pub struct Iter<'a> {
+pub struct ColumnIter<'a> {
     group: usize,
     column: usize,
-    row: usize,
-    group_len: usize,
-    column_len: usize,
     reader: &'a FileInfo,
+    next_page_offset: u64,
 
     buffer: Vec<u8>,
     data_offset: usize,
 }
 
-impl<'a> Iter<'a> {
-    fn new(meta: &'a mut FileInfo) -> Iter<'a> {
-        //
-        // Read page meta
-        //
+impl<'a> ColumnIter<'a> {
+    fn new(meta: &'a mut FileInfo) -> ColumnIter<'a> {
+
+        // Get 1st page offset
         let group = &meta.file_meta.row_groups[0];
         let column = &group.columns[0];
-        println!("Column: {:#?}", column);
+        let next_page_offset = column.file_offset as u64;
+
+        //println!("Column: {:#?}", column);
+        //let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
+
+        let mut iter = ColumnIter {
+            group: 0,
+            column: 0,
+            reader: meta,
+            next_page_offset,
+            buffer: Vec::new(),
+            data_offset: 0,
+        };
+
+        iter.next_page();
+        iter
+    }
+
+    fn next_page(&'a mut self) -> Result<()> {
+        let group = self.reader.file_meta.row_groups[self.group];
+        let column = &group.columns[self.column];
         let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
-        meta.protocol.inner().seek(SeekFrom::Start(column.file_offset as u64)).expect("Failed to seek to column metadata");
-        let page_header = PageHeader::read_from_in_protocol(&mut meta.protocol).expect("Failed to deserialize ColumnMetaData");
+
+        //
+        // Read page header
+        //
+        self.reader.protocol.inner().seek(SeekFrom::Start(self.next_page_offset)).expect("Failed to seek to column metadata");
+        let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
         println!("PageHeader: {:#?}", page_header);
 
         //
         // Read page raw data
         //
         // TODO: check page size for sanity
-        let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
-        meta.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
-        println!("page_data_compressed: {:?}", &page_data_compressed[0..100.min(page_data_compressed.len())]);
+        //let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
+        //if column_meta.codec == parquet::CompressionCodec::UNCOMPRESSED {
+        //} else {
+        //    self.reader.protocol.inner().read_exact(&mut page_data_compressed).expect("Failed to read page");
+        //}
+        //println!("page_data_compressed: {:?}", &page_data_compressed[0..100.min(page_data_compressed.len())]);
 
         //
         // Decompress page data
         //
-        let page_data = match column_meta.codec {
+        //let page_data =
+        match column_meta.codec {
             parquet::CompressionCodec::UNCOMPRESSED => {
-                page_data_compressed
+                self.buffer.resize(page_header.compressed_page_size as usize, 0);
+                self.reader.protocol.inner().read_exact(self.buffer.as_mut())?;
+                //page_data_compressed
             },
             parquet::CompressionCodec::SNAPPY => {
+                let mut page_data_compressed = vec![0_u8; page_header.compressed_page_size as usize];
+                self.reader.protocol.inner().read_exact(&mut page_data_compressed)?;
+
                 let mut buff = vec![0_u8; page_header.uncompressed_page_size as usize];
-                let res = snap::Decoder::new().decompress(&page_data_compressed, &mut buff).expect("Snappy decompression failed");
+                //let res = snap::Decoder::new().decompress(&page_data_compressed, &mut buff).expect("Snappy decompression failed");
+                let res = snap::Decoder::new().decompress(&page_data_compressed, self.buffer.as_mut())?;
                 println!("Snappy read: {}", res);
-                buff
+                //buff
             },
             // TODO
             _ => unimplemented!("this compression is not implemented yet: {:?}", column_meta.codec)
         };
-        println!("page_data (un-compressed)[{}]: {:?}", page_data.len(), &page_data[0..100.min(page_data.len())]);
+        println!("page_data (un-compressed)[{}]: {:?}", self.buffer.len(), self.buffer[0..100.min(self.buffer.len())].as_ref());
 
 
         let mut data_offset;
@@ -162,56 +182,36 @@ impl<'a> Iter<'a> {
             // Decode repetition and definition levels
             //
             //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
-            let definition_levels = BitPackingRleReader::new(1, &page_data[0..]).expect("Failed to parse definition levels");
+            let definition_levels = BitPackingRleReader::new(1, self.buffer[0..].as_ref()).expect("Failed to parse definition levels");
             //println!("definition_levels: {:?}", definition_levels);
             data_offset = definition_levels.next;
             println!("data_offset: {}", data_offset);
         }
 
-        Iter {
-            group: 0,
-            column: 0,
-            row: 0,
-            group_len: meta.file_meta.row_groups.len(),
-            column_len: meta.file_meta.row_groups[0].columns.len(),
-            reader: meta,
-            buffer: page_data,
-            data_offset,
-        }
+        self.next_page_offset += page_header.compressed_page_size as u64;
+        self.data_offset = data_offset as usize;
+
+        Ok(())
     }
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl<'a> Iterator for ColumnIter<'a> {
     // TODO: what's the right  way to act if error in format in iterator?
 
     type Item = i64;
     fn next(&mut self) -> Option<i64> {
 
-        if self.group >= self.group_len {
-            return None;
+        if self.data_offset >= self.buffer.len() {
+            let s = self;
+            let next_page = s.next_page();
+            if !next_page.is_ok() {
+                return None
+            }
         }
 
-        //
-        // Advance column pointer
-        //
-        /*if self.column >= self.column_len {
-            self.column = 0;
-            self.group += 1;
-            if self.group >= self.group_len {
-                return None;
-            }
-            group = &self.reader.file_meta.row_groups[self.group];
-            column = &group.columns[self.column];
-            self.column_len = group.columns.len(); // can column count be different in different column chunk?
-        } else {
-            group = &self.reader.file_meta.row_groups[self.group];
-            column = &group.columns[self.column];
-        }*/
-
-        //self.column += 1;
-        let current_data = &self.buffer[self.data_offset + self.row * 8..];
+        let current_data = &self.buffer[self.data_offset..];
         let res = LittleEndian::read_i64(current_data);
-        self.row += 1;
+        self.data_offset += 8;
         Some(res)
     }
 }
@@ -256,6 +256,9 @@ mod tests {
         for row in fileMeta.iter().take(10) {
             println!("Row: {}", row);
         }
+
+        let count = fileMeta.iter().count();
+        println!("Count: {}", count);
     }
 
     #[test]

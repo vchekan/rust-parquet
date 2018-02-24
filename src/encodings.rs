@@ -5,7 +5,7 @@ pub struct BitPackingRleReader<'a> {
     bit_width: u32,
     compressed_len: u32,
     data: &'a [u8],
-    pub next: usize,
+    pub next: u32,
 }
 
 impl<'a> BitPackingRleReader<'a> {
@@ -43,7 +43,7 @@ impl<'a> BitPackingRleReader<'a> {
             bit_width,
             compressed_len: 4 + len_encoded,
             data,
-            next: 4 + len_encoded as usize,
+            next: 4 + len_encoded,
         })
     }
  }
@@ -82,7 +82,6 @@ impl<'a> Iterator for RleIter<'a> {
         }
 
         None
-
     }
 }
 
@@ -157,7 +156,7 @@ fn read_bitpack_int(bit_width: u32, data: &[u8], offset: &mut usize) -> Result<i
         2 => Ok(LittleEndian::read_i16(&data[*offset..]) as i32),
         3 => Ok(LittleEndian::read_i24(&data[*offset..]) as i32),
         4 => Ok(LittleEndian::read_i32(&data[*offset..])),
-        _ => Err(format!("Can not handle packed int longer than 4. Got {}", bit_width))
+        _ => Err(format!("Can not handle packed int longer than 4 bytes. Got {}", bit_width))
     };
 
     if res.is_ok() {
