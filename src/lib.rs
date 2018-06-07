@@ -7,6 +7,7 @@ extern crate try_from;
 mod parquet;
 mod encodings;
 mod levels;
+mod page;
 
 use std::fs::{OpenOptions, File};
 use std::io;
@@ -17,6 +18,7 @@ use parquet::*;
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 
 use encodings::BitPackingRleReader;
+use page::PageIter;
 
 
 const MAGIC: &'static str ="PAR1";
@@ -32,7 +34,7 @@ impl FileInfo {
         let unbuffered = OpenOptions::new().read(true).open(file_name)?;
         let mut buffered = BufReader::new(unbuffered);
 
-        validate_magic(&mut buffered)?; //use byteorder::{ByteOrder, LittleEndian};
+        validate_magic(&mut buffered)?;
         
         // read footer metadata length and magic
         // TODO: BufReader's seek reset buffers even if seek is within buffered range :(
@@ -43,8 +45,9 @@ impl FileInfo {
         buffered.seek(SeekFrom::End(-(footer_len as i64 +8_i64))).expect("File metadata position failed");
 
         let mut protocol = TCompactInputProtocol::new(buffered);
-        let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).expect("Failed to deserialize file metadata");
-        println!("{:#?}", file_meta);
+        let file_meta = FileMetaData::read_from_in_protocol(&mut protocol).
+            expect("Failed to deserialize file metadata");
+        //println!("{:#?}", file_meta);
 
         Ok(FileInfo {
             file_meta,
@@ -133,14 +136,18 @@ impl<'a> ColumnIter<'a>  {
     fn next_page(&mut self) -> Result<()> {
         let group = &self.reader.file_meta.row_groups[self.group];
         let column = &group.columns[self.column];
-        let column_meta = column.meta_data.as_ref().expect("Column metadata is empty");
+        let column_meta = column.meta_data.as_ref().
+            expect("Column metadata is empty");
 
         //
         // Read page header
         //
-        self.reader.protocol.inner().seek(SeekFrom::Start(self.next_page_offset)).expect("Failed to seek to column metadata");
-        let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).expect("Failed to deserialize ColumnMetaData");
-        println!("{:#?}", page_header);
+        println!("Reading page @{}", self.next_page_offset);
+        self.reader.protocol.inner().seek(SeekFrom::Start(self.next_page_offset)).
+            expect("Failed to seek to column metadata");
+        let page_header = PageHeader::read_from_in_protocol(&mut self.reader.protocol).
+            expect("Failed to deserialize ColumnMetaData");
+        //println!("{:#?}", page_header);
 
         //
         // Decompress page data
@@ -172,7 +179,8 @@ impl<'a> ColumnIter<'a>  {
             // Decode repetition and definition levels
             //
             //let repetition_levels = RleReader::new(1, buff.as_slice()).expect("Failed to parse repetition levels");
-            let definition_levels = BitPackingRleReader::new(1, self.buffer[0..].as_ref()).expect("Failed to parse definition levels");
+            let definition_levels = BitPackingRleReader::new(1, self.buffer[0..].as_ref()).
+                expect("Failed to parse definition levels");
             //println!("definition_levels: {:?}", definition_levels);
             data_offset = definition_levels.next;
             println!("data_offset: {}", data_offset);
@@ -190,14 +198,17 @@ impl<'a> Iterator for ColumnIter<'a> {
 
     type Item = i64;
     fn next(&mut self) -> Option<i64> {
-
-        if self.data_offset >= self.buffer.len() {
-            println!("next: {} >= {}", self.data_offset, self.buffer.len());
-            let next_page_result = self.next_page();
-            if !next_page_result.is_ok() {
-                println!("next_page: {:?}", next_page_result);
+        println!(">>> self.data_offset > self.buffer.len(): {} > {}", self.data_offset, self.buffer.len());
+        if self.data_offset > self.buffer.len() {
+            println!("next: {} > {}", self.data_offset, self.buffer.len());
+            //let next_page_result = self.next_page();
+            //if !next_page_result.is_ok() {
+            if let Err(e) = self.next_page() {
+                println!("next_page error: {:?}", e);
                 return None
             }
+        } else {
+            return None
         }
 
         let current_data = &self.buffer[self.data_offset..];
@@ -214,6 +225,84 @@ fn max_definition_levels(path: Vec<String>) -> i32 {
 fn max_repetition_level() -> i32 {1}
 
 
+struct RowGroupIter<'a> {
+    file_info: &'a mut FileInfo,
+    row_group_idx: usize
+}
+
+impl<'a> RowGroupIter<'a> {
+    pub fn new(file_meta : &'a mut FileInfo) -> RowGroupIter<'a> {
+        RowGroupIter { file_info: file_meta, row_group_idx: 0}
+    }
+}
+
+impl<'a> Iterator for RowGroupIter<'a> {
+    type Item = &'a RowGroup;
+
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        if self.row_group_idx < self.file_info.file_meta.row_groups.len() {
+            let res = &self.file_info.file_meta.row_groups[self.row_group_idx];
+
+            self.row_group_idx += 1;
+            Some(res)
+        } else {
+            None
+        }
+    }
+}
+
+struct ColumnPagesIter<'a> {
+    row_group_iter: RowGroupIter<'a>,
+    column_idx: usize,
+    // Offset of start of current page in file
+    next_page_offset: i64,
+    eof_row_group_offset: i64,
+}
+
+impl<'a> ColumnPagesIter<'a> {
+    pub fn new(file_meta: &'a mut FileInfo, column: &String) -> ColumnPagesIter<'a> {
+        let row_group_iter = RowGroupIter::new(file_meta);
+
+        let column_idx = file_meta.file_meta.schema.iter().
+            position(|s| {&s.name == column}).expect("Column not found");
+
+        ColumnPagesIter {row_group_iter, column_idx, next_page_offset: 0_i64, eof_row_group_offset: 0_i64}
+    }
+
+    fn read_page_header(&mut self) -> PageHeader {
+        println!("Reading page @{}", self.next_page_offset);
+        self.row_group_iter.file_info.protocol.inner().seek(SeekFrom::Start(self.next_page_offset as u64)).
+            expect("Failed to seek to column metadata");
+        let page_header = PageHeader::read_from_in_protocol(&mut self.row_group_iter.file_info.protocol).
+            expect("Failed to deserialize ColumnMetaData");
+        //println!("{:#?}", page_header);
+
+        self.next_page_offset += page_header.compressed_page_size as i64;
+
+        page_header
+    }
+}
+
+impl<'a> Iterator for ColumnPagesIter<'a> {
+    type Item = &'a PageHeader;
+
+    fn next(&mut self) -> Option<<Self as Iterator>::Item> {
+        if self.next_page_offset < self.eof_row_group_offset {
+            Some(&self.read_page_header())
+        } else {
+            match self.row_group_iter.next() {
+                None => None,
+                Some(row_group) => {
+                    let column_chunk = row_group.columns[self.column_idx];
+                    self.next_page_offset = column_chunk.file_offset;
+                    self.eof_row_group_offset = column_chunk.file_offset + row_group.total_byte_size + 1_i64;
+                    self.next()
+                }
+            }
+        }
+
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -231,8 +320,30 @@ mod tests {
     }
 
     #[test]
-    fn iterator() {
+    fn column_pages_iterator() {
         let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        let it = ColumnPagesIter::new(&mut fileMeta, &"id".to_string());
+
+        let count = it.count();
+        println!("Count: {}", count);
+    }
+
+        #[test]
+    fn row_group_iterator() {
+        let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
+        let row_group_it = RowGroupIter::new(&mut fileMeta);
+        let count = row_group_it.count();
+        println!("Count: {}", count);
+
+        let rows: i64 = RowGroupIter::new(&mut fileMeta).
+            map(|g| {g.num_rows}).sum();
+        println!("Total rows: {}", rows);
+
+
+
+        /*for page in PageIter::new(&mut fileMeta.protocol, 4_u64) {
+            println!("Crc: {:?}", page.crc);
+        }*/
 
         /*
         let record = parquet!({
@@ -244,17 +355,19 @@ mod tests {
         });
         */
 
-        for row in fileMeta.iter().take(10) {
+        /*for row in fileMeta.iter().take(10) {
             println!("Row: {}", row);
-        }
+        }*/
 
-        let count = fileMeta.iter().count();
-        println!("Count: {}", count);
+        /*let count = fileMeta.iter().count();
+        assert_eq!(count, 131074);
+        println!("Count: {}", count);*/
     }
 
+    /*
     #[test]
     fn client() {
-        /*let record = parquet!{
+        let record = parquet!{
             reddit {
                 { id: u64,
                   body: String,
@@ -264,6 +377,6 @@ mod tests {
 
         let fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
         fileMeta.read().take(100)(|record| println!("{}", record));
-        */
     }
+    */
 }

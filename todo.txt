@@ -2,7 +2,9 @@
 * Generate data examples in java and test compatibility
 
 * Pull request to Thrift (expose internal stream)
+* implement multiple column groups
 * Write java test case generator
 * Switch to "failure" create
 * Add hints implementation to iterators
 * Design interactive visualization for compression (Bret Victor inspired)
+* implement hierarchical field search(iterator param)

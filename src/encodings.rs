@@ -3,6 +3,7 @@ use byteorder::{ByteOrder, LittleEndian};
 #[derive(Debug)]
 pub struct BitPackingRleReader<'a> {
     bit_width: u32,
+    byte_width: u32,
     compressed_len: u32,
     data: &'a [u8],
     pub next: u32,
@@ -23,27 +24,15 @@ impl<'a> BitPackingRleReader<'a> {
             ))
         }
 
-        let header: u32 = read_leb128(data, &mut pos);
-        let mode = if header & 1 == 1 { Mode::Packed } else { Mode::Rle };
         let bit_width = bit_width(max_level);
-        println!("Pack mode: {:?} header: {}", mode, header);
-        match mode {
-            Mode::Rle => {
-                let repeated = header >> 1;
-                let val = read_bitpack_int(bit_width, data, & mut pos).expect("Failed to decode RLE value");
-                println!("RLE decoding: repeated: {} val: {}", repeated, val);
-            }
-            Mode::Packed => {
-                //return Err("Mode::Packed not implemented yet".to_string());
-                unimplemented!("Mode::Packed")
-            }
-        }
+        let byte_width = byte_width(bit_width);
 
         Ok(BitPackingRleReader {
             bit_width,
-            compressed_len: 4 + len_encoded,
+            byte_width,
+            compressed_len: len_encoded,
             data,
-            next: 4 + len_encoded,
+            next: 4,
         })
     }
  }
@@ -53,27 +42,29 @@ impl<'a> IntoIterator for BitPackingRleReader<'a> {
     type IntoIter = RleIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        RleIter {
-            ptr: 0,
-            counter: 0,
-            data: &self.data[3 .. (self.compressed_len + 4) as usize],
-            value: 0,
-        }
+        println!(">>> 1");
+        RleIter::new(&self.data[3 .. (self.compressed_len + 4) as usize],
+            self.byte_width
+        )
     }
 }
 
 pub struct RleIter<'a> {
     ptr: u32,
     counter: i32,
-    value: u32,
+    value: i32,
     data: &'a [u8],
+    byte_width: u32
 }
 
 impl<'a> Iterator for RleIter<'a> {
     type Item = i32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.counter == 0 {
+        if self.counter > 0 {
+            self.counter -= 1;
+            return Some(self.value);
+        } else if self.counter == 0 {
             self.read_next()
         }
 
@@ -86,8 +77,37 @@ impl<'a> Iterator for RleIter<'a> {
 }
 
 impl<'a> RleIter<'a> {
+    fn new(data: &'a[u8], byte_width: u32) -> RleIter {
+        RleIter {
+            ptr: 0,
+            counter: 0,
+            data,
+            value: 0,
+            byte_width,
+        }
+    }
+
     fn read_next(&mut self) {
-        
+        if self.counter != 0 {
+            self.counter -= 1
+        } else {
+            let mut pos = 0_usize;
+            let header: u32 = read_leb128(self.data, &mut pos);
+            let mode = if header & 1 == 1 { Mode::Packed } else { Mode::Rle };
+            println!("Pack mode: {:?} header: {}", mode, header);
+            match mode {
+                Mode::Rle => {
+                    let repeated = header >> 1;
+                    let val = read_bitpack_int(self.byte_width, self.data, & mut pos).
+                        expect("Failed to decode RLE value");
+                    println!("RLE decoding: repeated: {} val: {}", repeated, val);
+                }
+                Mode::Packed => {
+                    //return Err("Mode::Packed not implemented yet".to_string());
+                    unimplemented!("Mode::Packed")
+                }
+            }
+        }
     }
 }
 
@@ -121,6 +141,10 @@ enum Mode {
 fn bit_width(max_int: u32) -> u32 {
     32 - max_int.leading_zeros()
 }
+fn byte_width(bit_width: u32) -> u32 {
+    (bit_width + 7) / 8
+}
+
 
 fn round_to_byte(bits: u32) -> u32 {
     (bits + 7) / 8
