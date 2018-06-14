@@ -226,13 +226,13 @@ fn max_repetition_level() -> i32 {1}
 
 
 struct RowGroupIter<'a> {
-    file_info: &'a mut FileInfo,
+    row_groups: &'a Vec<RowGroup>,
     row_group_idx: usize
 }
 
 impl<'a> RowGroupIter<'a> {
-    pub fn new(file_meta : &'a mut FileInfo) -> RowGroupIter<'a> {
-        RowGroupIter { file_info: file_meta, row_group_idx: 0}
+    pub fn new(row_groups: &'a Vec<RowGroup>) -> RowGroupIter<'a> {
+        RowGroupIter { row_groups, row_group_idx: 0}
     }
 }
 
@@ -240,8 +240,8 @@ impl<'a> Iterator for RowGroupIter<'a> {
     type Item = &'a RowGroup;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
-        if self.row_group_idx < self.file_info.file_meta.row_groups.len() {
-            let res = &self.file_info.file_meta.row_groups[self.row_group_idx];
+        if self.row_group_idx < self.row_groups.len() {
+            let res = &self.row_groups[self.row_group_idx];
 
             self.row_group_idx += 1;
             Some(res)
@@ -252,6 +252,7 @@ impl<'a> Iterator for RowGroupIter<'a> {
 }
 
 struct ColumnPagesIter<'a> {
+    protocol: &'a mut TCompactInputProtocol<BufReader<File>>,
     row_group_iter: RowGroupIter<'a>,
     column_idx: usize,
     // Offset of start of current page in file
@@ -261,21 +262,29 @@ struct ColumnPagesIter<'a> {
 
 impl<'a> ColumnPagesIter<'a> {
     pub fn new(file_meta: &'a mut FileInfo, column: &String) -> ColumnPagesIter<'a> {
-        let row_group_iter = RowGroupIter::new(file_meta);
+        let row_group_iter = RowGroupIter::new(&file_meta.file_meta.row_groups);
 
         let column_idx = file_meta.file_meta.schema.iter().
             position(|s| {&s.name == column}).expect("Column not found");
 
-        ColumnPagesIter {row_group_iter, column_idx, next_page_offset: 0_i64, eof_row_group_offset: 0_i64}
+        let protocol = &mut file_meta.protocol;
+
+        ColumnPagesIter {protocol, row_group_iter, column_idx, next_page_offset: 0_i64, eof_row_group_offset: 0_i64}
     }
 
     fn read_page_header(&mut self) -> PageHeader {
         println!("Reading page @{}", self.next_page_offset);
-        self.row_group_iter.file_info.protocol.inner().seek(SeekFrom::Start(self.next_page_offset as u64)).
+        self.protocol.inner().seek(SeekFrom::Start(self.next_page_offset as u64)).
             expect("Failed to seek to column metadata");
-        let page_header = PageHeader::read_from_in_protocol(&mut self.row_group_iter.file_info.protocol).
+        let page_header = PageHeader::read_from_in_protocol(self.protocol).
             expect("Failed to deserialize ColumnMetaData");
-        //println!("{:#?}", page_header);
+        println!("{:#?}", page_header);
+
+        println!("read_page_header: page offset {}->{}/{}",
+            self.next_page_offset,
+            self.next_page_offset + page_header.compressed_page_size as i64,
+            page_header.compressed_page_size
+        );
 
         self.next_page_offset += page_header.compressed_page_size as i64;
 
@@ -284,16 +293,16 @@ impl<'a> ColumnPagesIter<'a> {
 }
 
 impl<'a> Iterator for ColumnPagesIter<'a> {
-    type Item = &'a PageHeader;
+    type Item = PageHeader;
 
     fn next(&mut self) -> Option<<Self as Iterator>::Item> {
         if self.next_page_offset < self.eof_row_group_offset {
-            Some(&self.read_page_header())
+            Some(self.read_page_header())
         } else {
             match self.row_group_iter.next() {
                 None => None,
                 Some(row_group) => {
-                    let column_chunk = row_group.columns[self.column_idx];
+                    let column_chunk = &row_group.columns[self.column_idx];
                     self.next_page_offset = column_chunk.file_offset;
                     self.eof_row_group_offset = column_chunk.file_offset + row_group.total_byte_size + 1_i64;
                     self.next()
@@ -331,11 +340,11 @@ mod tests {
         #[test]
     fn row_group_iterator() {
         let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
-        let row_group_it = RowGroupIter::new(&mut fileMeta);
+        let row_group_it = RowGroupIter::new(&fileMeta.file_meta.row_groups);
         let count = row_group_it.count();
         println!("Count: {}", count);
 
-        let rows: i64 = RowGroupIter::new(&mut fileMeta).
+        let rows: i64 = RowGroupIter::new(&fileMeta.file_meta.row_groups).
             map(|g| {g.num_rows}).sum();
         println!("Total rows: {}", rows);
 
