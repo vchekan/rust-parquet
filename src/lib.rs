@@ -30,7 +30,7 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    pub fn open(file_name: &String) -> Result<FileInfo> {
+    pub fn open(file_name: &str) -> Result<FileInfo> {
         let unbuffered = OpenOptions::new().read(true).open(file_name)?;
         let mut buffered = BufReader::new(unbuffered);
 
@@ -219,7 +219,7 @@ impl<'a> Iterator for ColumnIter<'a> {
 }
 
 // TODO:
-fn max_definition_levels(path: Vec<String>) -> i32 {
+fn max_definition_levels(path: Vec<&str>) -> i32 {
     1
 }
 fn max_repetition_level() -> i32 {1}
@@ -261,11 +261,11 @@ struct ColumnPagesIter<'a> {
 }
 
 impl<'a> ColumnPagesIter<'a> {
-    pub fn new(file_meta: &'a mut FileInfo, column: &String) -> ColumnPagesIter<'a> {
+    pub fn new(file_meta: &'a mut FileInfo, column: &str) -> ColumnPagesIter<'a> {
         let row_group_iter = RowGroupIter::new(&file_meta.file_meta.row_groups);
 
         let column_idx = file_meta.file_meta.schema.iter().
-            position(|s| {&s.name == column}).expect("Column not found");
+            position(|s| {s.name == column}).expect("Column not found");
 
         let protocol = &mut file_meta.protocol;
 
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn column_pages_iterator() {
-        let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
-        let it = ColumnPagesIter::new(&mut fileMeta, &"id".to_string());
+        let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet").expect("Failed to read parquet file");
+        let it = ColumnPagesIter::new(&mut fileMeta, &"id");
 
         let count = it.count();
         println!("Count: {}", count);
@@ -342,7 +342,7 @@ mod tests {
         let mut fileMeta = FileInfo::open(&"test-data/test1.snappy.parquet".to_string()).expect("Failed to read parquet file");
         let row_group_it = RowGroupIter::new(&fileMeta.file_meta.row_groups);
         let count = row_group_it.count();
-        println!("Count: {}", count);
+        println!("rowgroup count: {}", count);
 
         let rows: i64 = RowGroupIter::new(&fileMeta.file_meta.row_groups).
             map(|g| {g.num_rows}).sum();
