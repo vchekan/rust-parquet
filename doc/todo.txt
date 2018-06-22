@@ -8,3 +8,4 @@
 * Add hints implementation to iterators
 * Design interactive visualization for compression (Bret Victor inspired)
 * implement hierarchical field search(iterator param)
+* Test multiple rowgroups (find field in rowgroup)

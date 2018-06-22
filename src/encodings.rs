@@ -15,7 +15,7 @@ impl<'a> BitPackingRleReader<'a> {
 
         let len_encoded = LittleEndian::read_u32(data);
         println!(">>> len_encoded: {0}", len_encoded);
-        let mut pos = 4_usize;
+        let pos = 4_usize;
 
         if pos + len_encoded as usize > data.len() {
             return Err(format!("Unexpected end of RLE data. Declared length {} but got {}",
